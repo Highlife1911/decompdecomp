@@ -108,6 +108,36 @@ def test_generated_pc_builds_quote_paths_and_only_process_successful_objects(tmp
     compilers.write_text(json.dumps({"src/auto/sample.cpp": "9.9"}))
     ok, output = project.run(["ninja", "all_source"], log=lambda _: None, timeout=30)
     assert not ok and "Visual C++ 9.9 isn't in" in output, output
+    # a compiler that isn't there leaves build.ninja as it was, its own rule too: once the map is right again (as
+    # try_compiler puts it back), the build writes itself again (cut off at the file, it had no rule for that)
+    ninja = (root / "build.ninja").read_text(encoding="utf-8")
+    assert "build build/TEST/src/auto/sample.obj: cl" in ninja and "build build.ninja: configure" in ninja
+    compilers.write_text("{}\n")
+    ok, output = project.run(["ninja", "all_source"], log=lambda _: None, timeout=30)
+    assert ok, output
+    assert "/I" + str(compiler_root / "6.0/Include") in record.read_text(encoding="utf-8-sig").splitlines()
+
+
+def test_a_pc_projects_compiler_map_is_written_while_a_build_reads_it(tmp_path, monkeypatch):
+    """Windows can't replace a file another process has open (WinError 5): a build reading file_compilers.json while
+    try_compiler switches or puts back a file's compiler. The write waits for it instead of leaving the map switched."""
+    path = scratch_pe.compilers_file(tmp_path, "game")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"src/auto/text_00401000.cpp": "8.0"}))
+    replace, busy = Path.replace, [2]
+
+    def held(self, target):
+        if busy[0]:
+            busy[0] -= 1
+            raise PermissionError(5, "Access is denied")
+        return replace(self, target)
+    monkeypatch.setattr(Path, "replace", held)
+    monkeypatch.setattr(scratch_pe.time, "sleep", lambda _: None)
+    scratch_pe.set_file_compiler(tmp_path, "game", "src/auto/text_00401000.cpp", "MSVC/6.0", "MSVC/6.0")
+    assert scratch_pe.file_compilers(tmp_path, "game") == {} and not path.with_suffix(".tmp").exists()
+    busy[0] = 99
+    with pytest.raises(PermissionError):  # held for good: the error, not a map silently left as it was
+        scratch_pe.set_file_compiler(tmp_path, "game", "src/auto/text_00401000.cpp", "MSVC/7.1", "MSVC/6.0")
 
 
 def _template_tool(name: str):

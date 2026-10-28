@@ -518,7 +518,7 @@ class ForkProject:
         cfg = self.objdiff_config()
         make = cfg.get("custom_make") or "make"
         tool = _tool(make) or make
-        rel = os.path.relpath(unit.base, self.root)
+        rel = Path(os.path.relpath(unit.base, self.root)).as_posix()  # the target as objdiff.json and build.ninja name it
         return self.run([tool, *cfg.get("custom_args", []), rel], log=log, timeout=600)
 
     def failed_units(self, targets: list[str]) -> set[str]:

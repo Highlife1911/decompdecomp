@@ -87,6 +87,11 @@ def main() -> None:
     info = json.loads(CONFIG.read_text(encoding="utf-8"))
     units = info["units"]
     headers = [p.as_posix() for p in files("include", (".h", ".hpp"))]
+    sources = files("src", (".c", ".cpp"))
+    versions, more = file_compilers(), file_flags()
+    # every file's compiler before build.ninja is opened: one that isn't there stops here and leaves the build.ninja of
+    # before whole (cut off at that file, it lost its own rule below and never wrote itself again once the map was right)
+    compilers = {src: msvc(versions.get(src.as_posix(), MSVC_VERSION)) for src in sources}
     with open("build.ninja", "w", encoding="utf-8") as f:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG.as_posix()} {(BUILD / 'target').as_posix()}", restat=True)
@@ -101,11 +106,10 @@ def main() -> None:
         targets = [(BUILD / "target" / f"{u}.obj").as_posix() for u in units]
         n.build(targets, "delink", [CONFIG.as_posix(), "tools/delink.py"])
         objs = []
-        versions, more = file_compilers(), file_flags()
-        for src in files("src", (".c", ".cpp")):
+        for src in sources:
             obj = (BUILD / src.with_suffix(".obj")).as_posix()
             src_posix = src.as_posix()
-            cl, include = msvc(versions.get(src_posix, MSVC_VERSION))
+            cl, include = compilers[src]
             n.build(obj, "cl", src_posix, implicit=[*headers, CONFIG.as_posix(), "tools/compile.py", "tools/names.py"],
                     variables={"cl": q([cl]).replace("$", "$$"), "include": q([include]).replace("$", "$$"),
                                "cflags": q(more.get(src_posix, [])).replace("$", "$$")})
@@ -123,7 +127,7 @@ def main() -> None:
                 implicit=[CONFIG.as_posix(), *exes, "tools/rebuild.py", "tools/delink.py"])
         n.build("rebuild", "phony", programs)
         n.build("build.ninja", "configure", ["tools/configure.py", CONFIG.as_posix(), *headers,
-                                             *[s.as_posix() for s in files("src", (".c", ".cpp"))],
+                                             *[s.as_posix() for s in sources],
                                              *[p.as_posix() for p in (FILE_COMPILERS, FILE_FLAGS) if p.exists()]])
         n.default(["prepare"])
 

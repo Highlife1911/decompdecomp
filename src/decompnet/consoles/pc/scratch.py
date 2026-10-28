@@ -37,6 +37,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1544,7 +1545,14 @@ def file_compilers(root: Path, version: str) -> dict[str, str]:
 def _write_compilers(path: Path, found: dict[str, str]) -> None:
     tmp = path.with_suffix(".tmp")  # a build reading it meanwhile sees the old map or the new one, never half
     tmp.write_text(json.dumps(dict(sorted(found.items())), indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    for wait in (0.05, 0.1, 0.2, 0.5, 1.0, None):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:  # Windows: a build reading the map (configure.py) holds it open for a moment
+            if wait is None:
+                raise
+            time.sleep(wait)
 
 
 def set_file_compiler(root: Path, version: str, source: str, compiler: str, default: str) -> None:
