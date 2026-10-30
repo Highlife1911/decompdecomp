@@ -295,6 +295,16 @@ class Console:
         that says so, relative to the project (to commit)."""
         raise RomError(f"{self.name} projects set their compilers in their own build")
 
+    # compile_aside tries a compiler on one file without touching the project's build, so try_compiler switches the
+    # file only to a compiler it matches with. False: try_compiler switches the file for each try, and every other
+    # file's build sees that meanwhile (ROADMAP.md: DS, GameCube and Wii still do).
+    tries_compilers_aside = False
+
+    def compile_aside(self, fp, source: str, compiler: str, output: str) -> tuple[bool, str]:
+        """Compile a source file with `compiler` into `output` (relative to the project) as the project's build would,
+        changing nothing the build reads: (whether it compiled, the compiler's output)."""
+        raise RomError(f"{self.name} projects can't compile a file aside yet")
+
     def program_compilers(self, fp) -> list[tuple[str, int, str, bool]]:
         """What the game's program itself says built it, where its files each have a compiler: (one of `compilers`
         to build them with, how many of its files, in words, whether it's installed), most files first; [] where it

@@ -1549,7 +1549,7 @@ def _write_compilers(path: Path, found: dict[str, str]) -> None:
         try:
             tmp.replace(path)
             return
-        except PermissionError:  # Windows: a build reading the map (configure.py) holds it open for a moment
+        except PermissionError:  # Windows: whatever reads the map (a build, a virus scanner) holds it open for a moment
             if wait is None:
                 raise
             time.sleep(wait)

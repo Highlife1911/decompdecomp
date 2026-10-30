@@ -8,6 +8,7 @@ one per source file (tools/delink.py), and compiles src/ with the game's Visual 
 macOS): each file with its own version when config/VERSION/file_compilers.json names one, and with the more flags
 config/VERSION/file_flags.json gives it (/Oy-: the frame pointer kept). objdiff.json (for objdiff and decompdecomp) compares every source file's functions with the original's.
 `ninja rebuild` puts the whole program back together from them (tools/rebuild.py) and checks it against your copy.
+With --try-compiler it writes nothing: one source file compiles with that version into --try-output, as the build would.
 Made by decompdecomp.
 """
 
@@ -33,6 +34,9 @@ parser.add_argument("--msvc", required=True, action="append",
                     help="Visual C++ directory (holds 6.0/Bin/CL.EXE, 10.0SP1/Bin/cl.exe, ...); several: the first "
                          "with MSVC_VERSION")
 parser.add_argument("--wibo", default="", help="runs the Windows compilers on Linux and macOS")
+parser.add_argument("--try-compiler", default="", help="only compile --try-source with this Visual C++ version")
+parser.add_argument("--try-source", default="", help="the source file --try-compiler compiles")
+parser.add_argument("--try-output", default="", help="the object --try-compiler writes")
 args = parser.parse_args()
 
 VERSION = args.version
@@ -83,6 +87,22 @@ def source_of(unit: str) -> str:
     return cpp.as_posix() if cpp.exists() or not cpp.with_suffix(".c").exists() else cpp.with_suffix(".c").as_posix()
 
 
+def compile_step() -> list[str]:
+    """tools/compile.py as every compile runs it, before the compiler, the files and the flags."""
+    step = [PYTHON, "tools/compile.py", "--config", CONFIG.as_posix()]
+    return step + ["--wrapper", args.wibo] if args.wibo and sys.platform != "win32" else step
+
+
+def try_compile() -> int:
+    """One source file with another compiler, for decompdecomp's try_compiler: a compile the build's own rule would
+    run, but nothing the build reads changes. A try through file_compilers.json showed every other file's build the
+    switched map for as long as it took, and one with a compiler that isn't installed stopped them all."""
+    cl, include = msvc(args.try_compiler)
+    return subprocess.run([*compile_step(), "--compiler", cl, "--include", include, "--output", args.try_output,
+                           "--source", args.try_source, "--", *CL_FLAGS,
+                           *file_flags().get(args.try_source, [])]).returncode
+
+
 def main() -> None:
     info = json.loads(CONFIG.read_text(encoding="utf-8"))
     units = info["units"]
@@ -95,11 +115,8 @@ def main() -> None:
     with open("build.ninja", "w", encoding="utf-8") as f:
         n = ninja_syntax.Writer(f)
         n.rule("delink", f"{PY} tools/delink.py {CONFIG.as_posix()} {(BUILD / 'target').as_posix()}", restat=True)
-        compiler = [PYTHON, "tools/compile.py", "--config", CONFIG.as_posix()]
-        if args.wibo and sys.platform != "win32":
-            compiler += ["--wrapper", args.wibo]
         # The runner invokes the compiler and names.py separately: cmd /c misparsed quoted compiler paths.
-        n.rule("cl", q(compiler).replace("$", "$$") + " --compiler $cl --include $include --output $out --source $in -- "
+        n.rule("cl", q(compile_step()).replace("$", "$$") + " --compiler $cl --include $include --output $out --source $in -- "
                + q(CL_FLAGS).replace("$", "$$") + " $cflags")
         n.rule("configure", f"{PY} tools/configure.py " + q(sys.argv[1:]).replace("$", "$$"), generator=True)
 
@@ -143,4 +160,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if args.try_compiler:
+        sys.exit(try_compile())
     main()

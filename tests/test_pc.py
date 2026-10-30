@@ -109,13 +109,102 @@ def test_generated_pc_builds_quote_paths_and_only_process_successful_objects(tmp
     ok, output = project.run(["ninja", "all_source"], log=lambda _: None, timeout=30)
     assert not ok and "Visual C++ 9.9 isn't in" in output, output
     # a compiler that isn't there leaves build.ninja as it was, its own rule too: once the map is right again (as
-    # try_compiler puts it back), the build writes itself again (cut off at the file, it had no rule for that)
+    # Settings' check puts it back), the build writes itself again (cut off at the file, it had no rule for that)
     ninja = (root / "build.ninja").read_text(encoding="utf-8")
     assert "build build/TEST/src/auto/sample.obj: cl" in ninja and "build build.ninja: configure" in ninja
     compilers.write_text("{}\n")
     ok, output = project.run(["ninja", "all_source"], log=lambda _: None, timeout=30)
     assert ok, output
     assert "/I" + str(compiler_root / "6.0/Include") in record.read_text(encoding="utf-8-sig").splitlines()
+    # a try compiles one file aside: with its flags and the other compiler, into its own object, and what the build
+    # reads stays as it is, so it takes no part in anyone's build. A compiler that isn't there fails only the try
+    config.with_name("file_flags.json").write_text(json.dumps({"src/auto/sample.cpp": ["/Oy-"]}))
+    subprocess.run([sys.executable, str(root / "tools/configure.py"), "TEST", "--msvc", str(compiler_root)],
+                   check=True, capture_output=True, timeout=30)
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (root / "build.ninja", compilers)}
+    tried = "build/TEST/src/auto/sample.try.obj"
+    aside = ["python", "tools/configure.py", "TEST", "--msvc", str(compiler_root), "--try-source", "src/auto/sample.cpp",
+             "--try-output", tried]
+    ok, output = project.run([*aside, "--try-compiler", "7.1"], log=lambda _: None, timeout=30)
+    assert ok, output
+    args = record.read_text(encoding="utf-8-sig").splitlines()
+    assert "/I" + str(compiler_root / "7.1/Include") in args and "/GX" in args and "/Oy-" in args
+    assert f"/Fo{tried}" in args and (root / tried).with_suffix(".named").read_text() == "processed"
+    ok, output = project.run([*aside, "--try-compiler", "9.9"], log=lambda _: None, timeout=30)
+    assert not ok and "Visual C++ 9.9 isn't in" in output, output
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}
+
+
+def test_try_compiler_switches_a_pc_file_only_to_a_compiler_it_matches_with(tmp_path, monkeypatch):
+    """A try through file_compilers.json showed every other file's build the switched map, and one with a compiler
+    that isn't installed stopped them all. Tries now compile aside: the map changes once, for the compiler that
+    matched, and the attempt that then counts is judged by the project's own build, as any."""
+    from decompnet.app.engine import RomNetwork
+    from decompnet.forks import objdiff
+    from decompnet.forks.project import Unit
+
+    net = RomNetwork(tmp_path / "decomp.db", tmp_path / "ws")
+    root = tmp_path / "ws" / "p"
+    name = "_func_00401000"
+    config = root / "config" / "v" / "functions.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"units": {"u": [{"name": name, "addr": 0x401000, "relocs": []}]}}, indent=1))
+    compilers = config.with_name("file_compilers.json")
+    compilers.write_text("{}\n")
+    (root / "src" / "auto").mkdir(parents=True)
+    source = root / "src" / "auto" / "u.cpp"
+    source.write_text("int func_00401000(void) { return 0; }\n")
+    (root / "objdiff.json").write_text(json.dumps({"units": []}))
+    (root / ".decomp.wtf.json").write_text(json.dumps({"version": "v", "compiler": "MSVC/6.0"}))
+    net.forks._register("p", "P", "fork", root, {"kind": "fork", "origin": "scratch", "version": "v",
+                                                  "platform": "pc", "ready": True}, "x")
+    base = root / "build" / "v" / "src" / "auto" / "u.obj"
+    base.parent.mkdir(parents=True)
+    unit = Unit("u", None, base, "src/auto/u.cpp", False, None)
+    report = {"units": [{"name": "u", "functions": [{"name": name, "size": "8"}]}]}
+    monkeypatch.setattr(ForkProject, "report", lambda self: report)
+    monkeypatch.setattr(ForkProject, "units", lambda self: [unit])
+    monkeypatch.setattr(ForkProject, "unit", lambda self, _: unit)
+    monkeypatch.setattr(ForkProject, "linkable", lambda self: False)
+    monkeypatch.setattr(ForkProject, "build_problem", lambda self: None)
+    monkeypatch.setattr(ForkProject, "git", lambda self, *args: "")
+    built, asides = [], []
+
+    def build_unit(self, u, log=None):
+        """The project's own build, with the compiler the map says."""
+        built.append(scratch_pe.file_compilers(root, "v").get("src/auto/u.cpp", "6.0"))
+        base.write_text(built[-1])
+        return True, ""
+
+    def compile_aside(fp, src, compiler, output):
+        asides.append(compiler)
+        assert scratch_pe.file_compilers(root, "v") == {}, "a try leaves the map alone"
+        if compiler == "MSVC/8.0":
+            return False, "configure: Visual C++ 8.0 isn't in the packs"
+        (root / output).write_text(compiler.removeprefix("MSVC/"))
+        return True, ""
+
+    def diff(self, u, symbol):
+        pct = 100.0 if u.base.read_text() == "7.1" else 50.0
+        return objdiff.FunctionDiff(symbol, pct, [], 8, {name: pct}, [], {})
+
+    monkeypatch.setattr(ForkProject, "build_unit", build_unit)
+    monkeypatch.setattr(ForkProject, "diff", diff)
+    monkeypatch.setattr(consoles.get("pc"), "compile_aside", compile_aside)
+    net.forks.sync("p", log=lambda *_: None)
+    agent, _ = net.local_agent("claude-1")
+    code = "int func_00401000(void) { return 1; }\n"
+    text = source.read_text()
+    said = net.forks.try_compiler(agent, "p", name, "MSVC/7.0", source=code)
+    assert "not kept" in said and "stays with MSVC/6.0" in said, said
+    said = net.forks.try_compiler(agent, "p", name, "MSVC/8.0", source=code)  # (not installed: this try's error alone)
+    assert "isn't in the packs" in said and "stays with MSVC/6.0" in said, said
+    assert compilers.read_text() == "{}\n" and source.read_text() == text and "8.0" not in built and "7.0" not in built
+    assert not list(base.parent.glob("*.try.obj"))
+    said = net.forks.try_compiler(agent, "p", name, "MSVC/7.1", source=code)
+    assert "built with MSVC/7.1 from now on" in said, said
+    assert scratch_pe.file_compilers(root, "v") == {"src/auto/u.cpp": "7.1"} and built[-1] == "7.1"
+    assert asides == ["MSVC/7.0", "MSVC/8.0", "MSVC/7.1"] and net._function(name, "p")["status"] == "matched"
 
 
 def test_a_pc_projects_compiler_map_is_written_while_a_build_reads_it(tmp_path, monkeypatch):

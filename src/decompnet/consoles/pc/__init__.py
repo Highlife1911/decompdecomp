@@ -275,6 +275,20 @@ class WindowsPC(Console):
                                   manifest.get("compiler", f"MSVC/{scratch.MSVC_DEFAULT}"))
         return scratch.compilers_file(fp.root, manifest["version"]).relative_to(fp.root).as_posix()
 
+    tries_compilers_aside = True
+
+    def compile_aside(self, fp, source: str, compiler: str, output: str) -> tuple[bool, str]:
+        from ...forks.project import ForkError
+        from . import scratch
+
+        try:
+            tools = self.tool_args()
+        except ForkError as e:  # (no compiler pack: said as the compile's error, and the attempt takes its change back)
+            return False, str(e)
+        return fp.run(["python", "tools/configure.py", (fp.manifest or {})["version"], *tools,
+                       "--try-compiler", compiler.removeprefix("MSVC/"), "--try-source", source, "--try-output", output],
+                      log=lambda *_: None, timeout=scratch.TOOL_SECONDS)
+
     def file_flags(self, fp, source: str) -> list[str] | None:
         from . import scratch
 

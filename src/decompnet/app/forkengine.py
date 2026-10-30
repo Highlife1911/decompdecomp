@@ -22,6 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from .. import arch, classes, consoles, similarity, structs, toolchains
@@ -2624,7 +2625,9 @@ class ForkEngine:
             pass
 
     def _attempt(self, agent: Agent, slug: str, function: str, source: str, keep: bool = True, prelude: str = "",
-                 quiet: int | None = None, comment: bool = False) -> dict:
+                 quiet: int | None = None, comment: bool = False, aside: str = "") -> dict:
+        """`aside`: a compiler to judge the file with, compiled apart from its build (Console.compile_aside) and never
+        kept: try_compiler's test of it, which says only whether it matches."""
         proj, fp, cfg = self.get(slug)
         fn = self._fn(slug, function)
         meta = self._meta(fn)
@@ -2747,7 +2750,12 @@ class ForkEngine:
                 if self._build_unit(proj, fp, unit)[0] and scores is not None:
                     self._keep_scores(proj, unit, before, scores)
 
-            ok, log = self._build_unit(proj, fp, unit)
+            judged = unit
+            if aside:  # (the file's own object stays its own compiler's, and nothing is left for the build to see)
+                judged = replace(unit, base=unit.base.with_name(f"{unit.base.stem}.try.obj"), mappings=None)
+                ok, log = console.compile_aside(fp, unit.source, aside, Path(os.path.relpath(judged.base, fp.root)).as_posix())
+            else:
+                ok, log = self._build_unit(proj, fp, unit)
             if not ok and (broken := fp.build_problem()) is not None:
                 # the build itself is broken, not the agent's code: nothing recorded or counted, and the project
                 # is set up again in the background (one project spent five compiles on a build.ninja whose python
@@ -2768,10 +2776,13 @@ class ForkEngine:
                 return {"text": f"❌ BUILD ERROR (your change was undone){why}\n{log[-3000:]}", "score": None,
                         "matched": False}
             try:
-                d = fp.diff(unit, symbol)
+                d = fp.diff(judged, symbol)
             except (ObjdiffError, ForkError) as e:
                 undo()
                 return {"text": f"❌ objdiff couldn't compare (your change was undone): {e}", "score": None, "matched": False}
+            finally:
+                if aside:
+                    judged.base.unlink(missing_ok=True)
             if quiet is None:
                 d.rows = with_constant_values(d.rows, consoles.get(cfg.get("platform")), fp)
                 self.net.keep_diff(agent.id, fn["id"], d.rows, objdiff.LEGEND)
@@ -2784,6 +2795,9 @@ class ForkEngine:
                                            f"{', '.join(broken[:8])}. Check you replaced the right definition "
                                            "(overloads?) and didn't change shared code.", None),
                         "score": None, "matched": False, "broken": broken}
+            if aside and d.matched:  # the attempt that counts comes once the file is built with it (the game's check too)
+                undo()
+                return {"text": f"✅ MATCH with {aside}", "score": 0, "matched": True}
             if linked and d.matched and not (ok := self._verify(proj, fp))[0]:
                 undo()
                 if quiet is None:
@@ -2856,7 +2870,10 @@ class ForkEngine:
         functions still match (the attempt's own rule); otherwise the file keeps its compiler and nothing is
         recorded. "all": the file's own compiler first (C that matches with it needs no switch), then the others,
         nearest versions first, until one matches or TRY_ALL_SECONDS pass (on the DS demo, C that matched with its
-        own 2.0sp1p5 moved its file to 2.0/base when the own one was skipped and the oldest went first)."""
+        own 2.0sp1p5 moved its file to 2.0/base when the own one was skipped and the oldest went first).
+        Where the console compiles a file aside (Console.tries_compilers_aside), the file's compiler changes only for
+        a version that matched there: other agents' builds never see a compiler being tried, one that isn't installed
+        stops none of them, and a crash can't leave the file switched."""
         proj, fp, cfg = self.get(slug)
         console = consoles.get(cfg.get("platform"))
         fn = self._fn(slug, function)
@@ -2886,6 +2903,13 @@ class ForkEngine:
         tried, kept, changed = [], None, False
         until = time.monotonic() + TRY_ALL_SECONDS
         held = self._hold_for_try(slug, function, agent)  # a function nobody holds is held only while it's tried
+
+        def said(c: str, res: dict) -> str:
+            if res.get("broken"):  # the file's other functions need its own compiler
+                res["text"] = (f"the file's matched {', '.join(res['broken'][:8])} no longer match with it. "
+                               f"If {fn['name']} needs it, give it a file of its own first (split_file)")
+            return f"{c}: {res['text']}" if len(wanted) == 1 else f"{c}: {res['text'].split(chr(10))[0]}"
+
         try:
             with self._tree(proj).exclusive() if linked else self._tree(proj).shared(), self._unit_lock(proj, unit.name):
                 try:
@@ -2895,6 +2919,11 @@ class ForkEngine:
                         if tried and time.monotonic() > until:
                             break
                         if c != own:
+                            if console.tries_compilers_aside:
+                                res = self._attempt(agent, slug, function, source, keep=False, quiet=0, aside=c)
+                                if not res["matched"]:
+                                    tried.append(said(c, res))
+                                    continue
                             with self._build_locks[proj["id"]]:  # (a build reads the map)
                                 rel = console.set_file_compiler(fp, unit.source, c)
                             changed = True
@@ -2908,10 +2937,7 @@ class ForkEngine:
                                                         f"it (found by {agent.name} with decompdecomp).")
                             self.net.filecompilers.tried(slug, unit.source, c)  # (the range checks around it)
                             return f"{c}: {res['text']}\n{unit.source} is built with {c} from now on."
-                        if res.get("broken"):  # the file's other functions need its own compiler
-                            res["text"] = (f"the file's matched {', '.join(res['broken'][:8])} no longer match with it. "
-                                           f"If {fn['name']} needs it, give it a file of its own first (split_file)")
-                        tried.append(f"{c}: {res['text']}" if len(wanted) == 1 else f"{c}: {res['text'].split(chr(10))[0]}")
+                        tried.append(said(c, res))
                 finally:
                     if changed and kept is None:
                         with self._build_locks[proj["id"]]:

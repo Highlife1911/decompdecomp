@@ -73,6 +73,9 @@ Where to start on a gap:
   method only through a declaration in the class), and optimised code's register locals (2005's S_LOCAL ranges)
   aren't listed. A game's PDB has to be beside its program, or dropped with it, at import: a project made before
   can't take one in yet.
+- **`try_compiler` without switching the file**: PC compiles a try aside (`Console.compile_aside`), so the file's
+  compiler changes only for one that matches. DS, GameCube and Wii still switch the file for each try, and their
+  other files' builds see it meanwhile. `search_flags` and Settings' check of a compiler still switch on PC too.
 - **Function-end reports** cut MIPS functions (`engine._cut`) and, in project mode, a console's own
   (`Console.cut_function`: PC's functions.json). DS and GameCube projects need theirs.
 - **Tidying a ROM project**: its C is the database's, one function at a time, with one shared header per segment
