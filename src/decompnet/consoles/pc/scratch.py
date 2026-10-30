@@ -37,7 +37,7 @@ import shutil
 import struct
 import subprocess
 import sys
-import time
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1534,25 +1534,35 @@ def compilers_file(root: Path, version: str) -> Path:
     return root / "config" / version / "file_compilers.json"
 
 
-def file_compilers(root: Path, version: str) -> dict[str, str]:
-    """{source file: Visual C++ version} for the files not built with the project's own (tools/configure.py reads it)."""
+# Who reads a map while it's written. The app's threads (an agent's brief asks its file's compiler) take this lock: on
+# Windows a file open for reading can't be replaced (WinError 5), and with one thread reading in a loop most writes
+# failed. It's held for the file's read or replace alone, never a compile, so a brief doesn't wait for a build.
+# configure.py reads them only in a build, and the engine's locks (its tree's, its builds') keep their writers out.
+_MAPS = threading.Lock()
+
+
+def _read_map(path: Path) -> dict:
     try:
-        return json.loads(compilers_file(root, version).read_text(encoding="utf-8"))
+        with _MAPS:
+            return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
+def file_compilers(root: Path, version: str) -> dict[str, str]:
+    """{source file: Visual C++ version} for the files not built with the project's own (tools/configure.py reads it)."""
+    return _read_map(compilers_file(root, version))
+
+
 def _write_compilers(path: Path, found: dict[str, str]) -> None:
     tmp = path.with_suffix(".tmp")  # a build reading it meanwhile sees the old map or the new one, never half
-    tmp.write_text(json.dumps(dict(sorted(found.items())), indent=2) + "\n", encoding="utf-8")
-    for wait in (0.05, 0.1, 0.2, 0.5, 1.0, None):
+    with _MAPS:
+        tmp.write_text(json.dumps(dict(sorted(found.items())), indent=2) + "\n", encoding="utf-8")
         try:
             tmp.replace(path)
-            return
-        except PermissionError:  # Windows: whatever reads the map (a build, a virus scanner) holds it open for a moment
-            if wait is None:
-                raise
-            time.sleep(wait)
+        except PermissionError as e:  # (a program outside the app: a virus scanner, an editor)
+            tmp.unlink(missing_ok=True)
+            raise ForkError(f"another program has {path.name} open, so it wasn't changed: try again") from e
 
 
 def set_file_compiler(root: Path, version: str, source: str, compiler: str, default: str) -> None:
@@ -1605,10 +1615,7 @@ def flags_file(root: Path, version: str) -> Path:
 
 def file_flags(root: Path, version: str) -> dict[str, list[str]]:
     """{source file: flags} for the files built with more flags than the project's (tools/configure.py reads it)."""
-    try:
-        return json.loads(flags_file(root, version).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    return _read_map(flags_file(root, version))
 
 
 def set_file_flags(root: Path, version: str, source: str, flags: list[str]) -> None:

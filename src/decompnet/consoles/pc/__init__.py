@@ -285,8 +285,11 @@ class WindowsPC(Console):
             tools = self.tool_args()
         except ForkError as e:  # (no compiler pack: said as the compile's error, and the attempt takes its change back)
             return False, str(e)
-        return fp.run(["python", "tools/configure.py", (fp.manifest or {})["version"], *tools,
-                       "--try-compiler", compiler.removeprefix("MSVC/"), "--try-source", source, "--try-output", output],
+        version = (fp.manifest or {})["version"]
+        # (the file's flags from here: this runs beside the builds, and without their lock nothing else reads the maps)
+        flags = [f"--try-flag={f}" for f in scratch.file_flags(fp.root, version).get(source, [])]
+        return fp.run(["python", "tools/configure.py", version, *tools, "--try-compiler", compiler.removeprefix("MSVC/"),
+                       "--try-source", source, "--try-output", output, *flags],
                       log=lambda *_: None, timeout=scratch.TOOL_SECONDS)
 
     def file_flags(self, fp, source: str) -> list[str] | None:

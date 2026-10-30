@@ -13,6 +13,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -123,16 +124,61 @@ def test_generated_pc_builds_quote_paths_and_only_process_successful_objects(tmp
                    check=True, capture_output=True, timeout=30)
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (root / "build.ninja", compilers)}
     tried = "build/TEST/src/auto/sample.try.obj"
-    aside = ["python", "tools/configure.py", "TEST", "--msvc", str(compiler_root), "--try-source", "src/auto/sample.cpp",
-             "--try-output", tried]
-    ok, output = project.run([*aside, "--try-compiler", "7.1"], log=lambda _: None, timeout=30)
+    (root / ".decomp.wtf.json").write_text(json.dumps({"version": "TEST"}))
+    pc = consoles.get("pc")
+    monkeypatch.setattr(pc, "tool_args", lambda: ["--msvc", str(compiler_root)])
+    ok, output = pc.compile_aside(project, "src/auto/sample.cpp", "MSVC/7.1", tried)
     assert ok, output
     args = record.read_text(encoding="utf-8-sig").splitlines()
     assert "/I" + str(compiler_root / "7.1/Include") in args and "/GX" in args and "/Oy-" in args
     assert f"/Fo{tried}" in args and (root / tried).with_suffix(".named").read_text() == "processed"
-    ok, output = project.run([*aside, "--try-compiler", "9.9"], log=lambda _: None, timeout=30)
+    ok, output = pc.compile_aside(project, "src/auto/sample.cpp", "MSVC/9.9", tried)
     assert not ok and "Visual C++ 9.9 isn't in" in output, output
     assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}
+    # (the flags come from the app: running beside the builds, configure.py reads no map of its own)
+    ok, output = project.run(["python", "tools/configure.py", "TEST", "--msvc", str(compiler_root), "--try-compiler",
+                              "7.1", "--try-source", "src/auto/sample.cpp", "--try-output", tried],
+                             log=lambda _: None, timeout=30)
+    assert ok and "/Oy-" not in record.read_text(encoding="utf-8-sig").splitlines(), output
+
+
+def test_a_pc_files_map_can_be_written_while_the_app_reads_it(tmp_path):
+    """On Windows a file open for reading can't be replaced: a write failed with WinError 5 while another agent's
+    brief read the map. The app's reads and writes take turns, so none waits and retries, and none fails."""
+    scratch_pe.compilers_file(tmp_path, "v").parent.mkdir(parents=True)
+    stop = threading.Event()
+
+    def read():
+        while not stop.is_set():
+            scratch_pe.file_compilers(tmp_path, "v")
+
+    readers = [threading.Thread(target=read, daemon=True) for _ in range(2)]
+    for reader in readers:
+        reader.start()
+    try:
+        for n in range(200):
+            scratch_pe.set_file_compiler(tmp_path, "v", "src/a.cpp", f"MSVC/7.{n}", "MSVC/6.0")
+    finally:
+        stop.set()
+        for reader in readers:
+            reader.join()
+    assert scratch_pe.file_compilers(tmp_path, "v") == {"src/a.cpp": "7.199"}
+
+
+def test_a_pc_files_map_held_by_another_program_says_so_and_stays(tmp_path, monkeypatch):
+    """A virus scanner holding the map isn't the app's to wait for: the write fails at once, in words, the map as it
+    was and nothing left beside it."""
+    path = scratch_pe.compilers_file(tmp_path, "v")
+    path.parent.mkdir(parents=True)
+    path.write_text("{}\n")
+
+    def held(*_):
+        raise PermissionError(13, "held")
+
+    monkeypatch.setattr(Path, "replace", held)
+    with pytest.raises(ForkError, match="another program has file_compilers.json open"):
+        scratch_pe.set_file_compiler(tmp_path, "v", "src/a.cpp", "MSVC/7.1", "MSVC/6.0")
+    assert path.read_text() == "{}\n" and [p.name for p in path.parent.iterdir()] == [path.name]
 
 
 def test_try_compiler_switches_a_pc_file_only_to_a_compiler_it_matches_with(tmp_path, monkeypatch):
@@ -205,28 +251,6 @@ def test_try_compiler_switches_a_pc_file_only_to_a_compiler_it_matches_with(tmp_
     assert "built with MSVC/7.1 from now on" in said, said
     assert scratch_pe.file_compilers(root, "v") == {"src/auto/u.cpp": "7.1"} and built[-1] == "7.1"
     assert asides == ["MSVC/7.0", "MSVC/8.0", "MSVC/7.1"] and net._function(name, "p")["status"] == "matched"
-
-
-def test_a_pc_projects_compiler_map_is_written_while_a_build_reads_it(tmp_path, monkeypatch):
-    """Windows can't replace a file another process has open (WinError 5): a build reading file_compilers.json while
-    try_compiler switches or puts back a file's compiler. The write waits for it instead of leaving the map switched."""
-    path = scratch_pe.compilers_file(tmp_path, "game")
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"src/auto/text_00401000.cpp": "8.0"}))
-    replace, busy = Path.replace, [2]
-
-    def held(self, target):
-        if busy[0]:
-            busy[0] -= 1
-            raise PermissionError(5, "Access is denied")
-        return replace(self, target)
-    monkeypatch.setattr(Path, "replace", held)
-    monkeypatch.setattr(scratch_pe.time, "sleep", lambda _: None)
-    scratch_pe.set_file_compiler(tmp_path, "game", "src/auto/text_00401000.cpp", "MSVC/6.0", "MSVC/6.0")
-    assert scratch_pe.file_compilers(tmp_path, "game") == {} and not path.with_suffix(".tmp").exists()
-    busy[0] = 99
-    with pytest.raises(PermissionError):  # held for good: the error, not a map silently left as it was
-        scratch_pe.set_file_compiler(tmp_path, "game", "src/auto/text_00401000.cpp", "MSVC/7.1", "MSVC/6.0")
 
 
 def _template_tool(name: str):

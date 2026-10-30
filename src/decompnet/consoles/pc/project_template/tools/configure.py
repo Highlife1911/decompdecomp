@@ -37,6 +37,7 @@ parser.add_argument("--wibo", default="", help="runs the Windows compilers on Li
 parser.add_argument("--try-compiler", default="", help="only compile --try-source with this Visual C++ version")
 parser.add_argument("--try-source", default="", help="the source file --try-compiler compiles")
 parser.add_argument("--try-output", default="", help="the object --try-compiler writes")
+parser.add_argument("--try-flag", action="append", default=[], help="a flag of --try-source's own (repeatable)")
 args = parser.parse_args()
 
 VERSION = args.version
@@ -99,8 +100,7 @@ def try_compile() -> int:
     switched map for as long as it took, and one with a compiler that isn't installed stopped them all."""
     cl, include = msvc(args.try_compiler)
     return subprocess.run([*compile_step(), "--compiler", cl, "--include", include, "--output", args.try_output,
-                           "--source", args.try_source, "--", *CL_FLAGS,
-                           *file_flags().get(args.try_source, [])]).returncode
+                           "--source", args.try_source, "--", *CL_FLAGS, *args.try_flag]).returncode
 
 
 def main() -> None:
